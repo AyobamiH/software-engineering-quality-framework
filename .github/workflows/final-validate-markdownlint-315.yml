@@ -1,0 +1,139 @@
+name: Final validation for markdownlint-cli issue 315
+
+on:
+  push:
+    branches:
+      - automation/final-validate-markdownlint-315
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout clean contribution branch
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: chore/update-markdownlint-cli-315
+          fetch-depth: 0
+
+      - name: Verify clean contribution scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "897345d40dd3ed39c381e9b1b59112e74652676e"
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          test "$(git diff --name-only origin/main...HEAD)" = "scripts/markdown-check-format.sh"
+          git diff --check origin/main...HEAD
+          bash -n scripts/markdown-check-format.sh
+          test -z "$(git status --porcelain)"
+
+      - name: Verify official release and immutable image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/igorshubovych/markdownlint-cli@sha256:d994ac260316939ec7e2fb63b07ff6266754aa9ab64976d1e63948fb89f81772'
+
+          release_tag=$(curl -fsSL \
+            https://api.github.com/repos/igorshubovych/markdownlint-cli/releases/tags/v0.39.0 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          test "$release_tag" = 'v0.39.0'
+
+          docker pull "$image"
+          resolved=$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')
+          version=$(docker run --rm "$image" --version 2>&1 | tail -n 1 | tr -d '\r')
+
+          test "$resolved" = "$image"
+          test "$version" = '0.39.0'
+          grep -Fq "$image # v0.39.0" scripts/markdown-check-format.sh
+          grep -Fq -- '--disable MD013 MD033 MD055 MD056' scripts/markdown-check-format.sh
+
+      - name: Prove lint-policy parity across all Markdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_image='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          new_image='ghcr.io/igorshubovych/markdownlint-cli@sha256:d994ac260316939ec7e2fb63b07ff6266754aa9ab64976d1e63948fb89f81772'
+
+          docker pull "$old_image"
+          docker pull "$new_image"
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("${file#./}")
+          done < <(find . -path './.git' -prune -o -type f -name '*.md' -print0 | sort -z)
+          test "${#files[@]}" -gt 0
+
+          set +e
+          docker run --rm -v "$PWD:/workdir" "$old_image" \
+            "${files[@]}" --disable MD013 MD033 > old.log 2>&1
+          old_status=$?
+          docker run --rm -v "$PWD:/workdir" "$new_image" \
+            "${files[@]}" --disable MD013 MD033 MD055 MD056 > new.log 2>&1
+          new_status=$?
+          set -e
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(r"^(.*?\.md):(\d+)(?::\d+)?(?: error)? (MD\d+)")
+
+          def findings(path):
+              result = set()
+              for line in Path(path).read_text(encoding="utf-8").splitlines():
+                  match = pattern.match(line)
+                  if match:
+                      result.add((match.group(1), int(match.group(2)), match.group(3)))
+              return result
+
+          old = findings("old.log")
+          new = findings("new.log")
+          print(f"OLD_FINDINGS={len(old)} NEW_FINDINGS={len(new)}")
+          print("ADDED", sorted(new - old))
+          print("REMOVED", sorted(old - new))
+          if new != old:
+              raise SystemExit("The updated image changed the repository's existing lint findings")
+          PY
+
+          test "$new_status" -eq "$old_status"
+          ! grep -qi 'punycode' new.log
+          rm old.log new.log
+          test -z "$(git status --porcelain --untracked-files=no)"
+
+      - name: Exercise the repository script on valid and invalid changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp README.md "$RUNNER_TEMP/README.md"
+
+          printf '\n' >> README.md
+          set +e
+          BRANCH_NAME=main scripts/markdown-check-format.sh \
+            > "$RUNNER_TEMP/valid.log" 2>&1
+          valid_status=$?
+          set -e
+          cp "$RUNNER_TEMP/README.md" README.md
+
+          printf '\n\tinvalid tab\n' >> README.md
+          set +e
+          BRANCH_NAME=main scripts/markdown-check-format.sh \
+            > "$RUNNER_TEMP/invalid.log" 2>&1
+          invalid_status=$?
+          set -e
+          cp "$RUNNER_TEMP/README.md" README.md
+
+          printf '%s\n' '--- valid change output ---'
+          cat "$RUNNER_TEMP/valid.log"
+          printf '%s\n' '--- invalid change output ---'
+          cat "$RUNNER_TEMP/invalid.log"
+
+          test "$valid_status" -eq 0
+          test "$invalid_status" -ne 0
+          grep -Fq 'MD010' "$RUNNER_TEMP/invalid.log"
+          ! grep -qi 'punycode' "$RUNNER_TEMP/valid.log"
+          ! grep -qi 'punycode' "$RUNNER_TEMP/invalid.log"
+          test -z "$(git status --porcelain)"
