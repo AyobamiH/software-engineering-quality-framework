@@ -1,0 +1,44 @@
+name: Validate open source practice link
+
+on:
+  pull_request:
+    branches:
+      - automation/validate-open-source-link-348
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: af0f28e77b9185299b7a221dbcba3bcb70eaf20e
+          fetch-depth: 0
+
+      - name: Verify audited contribution
+        run: |
+          test "$(git rev-parse HEAD)" = "af0f28e77b9185299b7a221dbcba3bcb70eaf20e"
+          test "$(git rev-parse origin/main)" = "02563dfce3670db46ad4d9635cd5bebdca8d2934"
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          test "$(git diff --name-only origin/main...HEAD)" = "principles.md"
+          git diff --check origin/main...HEAD
+
+      - name: Run repository Markdown lint
+        run: BRANCH_NAME=main scripts/markdown-check-format.sh
+
+      - name: Verify discoverability and summary fidelity
+        run: |
+          test "$(grep -Foc '[Code in the open.](practices/open-source.md)' principles.md)" -eq 1
+          test -f practices/open-source.md
+          grep -Fq "we should code in the open by default" practices/open-source.md
+          grep -Fq "Open source dependencies" practices/open-source.md
+          grep -Fq "licences which grant us permission to use those dependencies" practices/open-source.md
+
+      - name: Confirm clean working tree
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=no)"
