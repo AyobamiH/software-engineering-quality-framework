@@ -1,0 +1,49 @@
+name: Validate browser guidance fix
+
+on:
+  push:
+    branches:
+      - automation/validate-browser-guidance-358
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out clean contribution
+        run: git checkout docs/fix-browser-guidance-links-358
+
+      - name: Verify contribution scope
+        run: |
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          test "$(git diff --name-only origin/main...HEAD)" = "practices/testing.md"
+          git diff --check origin/main...HEAD
+
+      - name: Run repository Markdown lint
+        run: BRANCH_NAME=main scripts/markdown-check-format.sh
+
+      - name: Verify browser guidance and public link
+        run: |
+          url="https://www.gov.uk/service-manual/technology/designing-for-different-browsers-and-devices"
+          test "$(grep -Foc "$url" practices/testing.md)" -eq 1
+          ! grep -Fq "aalto.digital.nhs.uk" practices/testing.md
+          ! grep -Fq "markdown-link-check-disable" practices/testing.md
+
+          page="$RUNNER_TEMP/govuk-browser-guidance.html"
+          curl --fail --location --silent --show-error --retry 3 \
+            --output "$page" "$url"
+          grep -Fq "Browsers to test in" "$page"
+          grep -iq "analytics" "$page"
+
+      - name: Confirm clean working tree
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=no)"
