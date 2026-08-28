@@ -110,7 +110,7 @@ jobs:
           set -euo pipefail
           cp README.md "$RUNNER_TEMP/README.md"
 
-          printf '\n' >> README.md
+          printf '<!-- markdownlint validation -->\n' >> README.md
           set +e
           BRANCH_NAME=main scripts/markdown-check-format.sh \
             > "$RUNNER_TEMP/valid.log" 2>&1
@@ -118,7 +118,7 @@ jobs:
           set -e
           cp "$RUNNER_TEMP/README.md" README.md
 
-          printf '\n\tinvalid tab\n' >> README.md
+          printf '\tinvalid tab\n' >> README.md
           set +e
           BRANCH_NAME=main scripts/markdown-check-format.sh \
             > "$RUNNER_TEMP/invalid.log" 2>&1
