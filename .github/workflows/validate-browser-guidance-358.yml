@@ -14,15 +14,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
+          ref: ce8b205ad92fd126b4b96d4a982d97cee4544a6a
           fetch-depth: 0
 
-      - name: Check out clean contribution
-        run: git checkout docs/fix-browser-guidance-links-358
-
-      - name: Verify contribution scope
+      - name: Verify audited contribution
         run: |
+          test "$(git rev-parse HEAD)" = "ce8b205ad92fd126b4b96d4a982d97cee4544a6a"
+          test "$(git rev-parse origin/main)" = "02563dfce3670db46ad4d9635cd5bebdca8d2934"
           test "$(git rev-list --count origin/main..HEAD)" -eq 1
           test "$(git diff --name-only origin/main...HEAD)" = "practices/testing.md"
           git diff --check origin/main...HEAD
@@ -38,8 +38,7 @@ jobs:
           ! grep -Fq "markdown-link-check-disable" practices/testing.md
 
           page="$RUNNER_TEMP/govuk-browser-guidance.html"
-          curl --fail --location --silent --show-error --retry 3 \
-            --output "$page" "$url"
+          curl --fail --location --silent --show-error --retry 3             --output "$page" "$url"
           grep -Fq "Browsers to test in" "$page"
           grep -iq "analytics" "$page"
 
