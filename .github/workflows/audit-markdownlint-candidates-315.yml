@@ -1,0 +1,123 @@
+name: Audit supported markdownlint candidates for issue 315
+
+on:
+  push:
+    branches:
+      - automation/audit-markdownlint-candidates-315
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Compare supported-runtime candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          old='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          docker pull "$old"
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("${file#./}")
+          done < <(find . -path './.git' -prune -o -type f -name '*.md' -print0 | sort -z)
+
+          set +e
+          docker run --rm -v "$PWD:/workdir" "$old" \
+            "${files[@]}" --disable MD013 MD033 > old.log 2>&1
+          old_status=$?
+          set -e
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(r"^(.*?\.md):(\d+)(?::\d+)?(?: error)? (MD\d+)")
+          findings = set()
+          for line in Path("old.log").read_text(encoding="utf-8").splitlines():
+              match = pattern.match(line)
+              if match:
+                  findings.add((match.group(1), int(match.group(2)), match.group(3)))
+          Path("old-findings.txt").write_text(
+              "\n".join(f"{path}|{line}|{rule}" for path, line, rule in sorted(findings)) + "\n",
+              encoding="utf-8",
+          )
+          print(f"OLD_FINDINGS={len(findings)}")
+          PY
+
+          audit_candidate() {
+            tag="$1"
+            shift
+            image="ghcr.io/igorshubovych/markdownlint-cli:$tag"
+            docker pull "$image"
+            digest=$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')
+            node_version=$(docker run --rm --entrypoint node "$image" --version)
+            cli_version=$(docker run --rm "$image" --version)
+
+            set +e
+            docker run --rm -v "$PWD:/workdir" "$image" \
+              "${files[@]}" --disable "$@" > candidate.log 2>&1
+            status=$?
+            pending=$(docker run --rm -e NODE_OPTIONS=--pending-deprecation \
+              -v "$PWD:/workdir" "$image" README.md --disable "$@" 2>&1)
+            pending_status=$?
+            set -e
+
+            TAG="$tag" DIGEST="$digest" NODE_VERSION="$node_version" \
+              CLI_VERSION="$cli_version" STATUS="$status" OLD_STATUS="$old_status" \
+              python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(r"^(.*?\.md):(\d+)(?::\d+)?(?: error)? (MD\d+)")
+
+          def read_findings(path):
+              result = set()
+              for line in Path(path).read_text(encoding="utf-8").splitlines():
+                  match = pattern.match(line)
+                  if match:
+                      result.add((match.group(1), int(match.group(2)), match.group(3)))
+              return result
+
+          old = {
+              (parts[0], int(parts[1]), parts[2])
+              for line in Path("old-findings.txt").read_text(encoding="utf-8").splitlines()
+              if line
+              for parts in [line.split("|")]
+          }
+          candidate = read_findings("candidate.log")
+          print(
+              "CANDIDATE",
+              os.environ["TAG"],
+              "DIGEST", os.environ["DIGEST"],
+              "NODE", os.environ["NODE_VERSION"],
+              "CLI", os.environ["CLI_VERSION"],
+              "STATUS", os.environ["STATUS"],
+              "FINDINGS", len(candidate),
+          )
+          print("ADDED", sorted(candidate - old))
+          print("REMOVED", sorted(old - candidate))
+          PY
+
+            echo "PENDING_STATUS=$pending_status"
+            printf '%s\n' "$pending"
+            ! grep -qi 'punycode' <<< "$pending"
+            rm candidate.log
+          }
+
+          audit_candidate v0.43.0 MD013 MD033 MD055 MD056 MD058
+          audit_candidate v0.44.0 MD013 MD033 MD055 MD056 MD058
+          audit_candidate v0.45.0 MD013 MD033 MD055 MD056 MD058 MD059
+          audit_candidate v0.48.0 MD013 MD033 MD055 MD056 MD058 MD059 MD060
+          audit_candidate v0.49.1 MD013 MD033 MD055 MD056 MD058 MD059 MD060
+
+          rm old.log old-findings.txt
+          test -z "$(git status --porcelain --untracked-files=no)"
