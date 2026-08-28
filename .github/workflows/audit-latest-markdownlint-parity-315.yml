@@ -1,0 +1,93 @@
+name: Audit latest markdownlint parity for issue 315
+
+on:
+  push:
+    branches:
+      - automation/audit-latest-markdownlint-parity-315
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Prove latest image parity with two structural fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          old='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          latest='ghcr.io/igorshubovych/markdownlint-cli@sha256:905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de'
+
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('practices/observability.md')
+          text = path.read_text(encoding='utf-8')
+          replacements = {
+              '**Clear-box monitoring**<br/>': '### Clear-box monitoring',
+              '**Opaque-box monitoring**<br/>': '### Opaque-box monitoring',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'Expected one occurrence of {old!r}')
+              text = text.replace(old, new)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          docker pull "$old"
+          docker pull "$latest"
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("${file#./}")
+          done < <(find . -path './.git' -prune -o -type f -name '*.md' -print0 | sort -z)
+
+          set +e
+          docker run --rm -v "$PWD:/workdir" "$old" \
+            "${files[@]}" --disable MD013 MD033 > old.log 2>&1
+          old_status=$?
+          docker run --rm -v "$PWD:/workdir" "$latest" \
+            "${files[@]}" --disable MD013 MD033 MD055 MD056 MD058 MD059 MD060 > latest.log 2>&1
+          latest_status=$?
+          set -e
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(r"^(.*?\.md):(\d+)(?::\d+)?(?: error)? (MD\d+)")
+
+          def findings(path):
+              result = set()
+              for line in Path(path).read_text(encoding='utf-8').splitlines():
+                  match = pattern.match(line)
+                  if match:
+                      result.add((match.group(1), int(match.group(2)), match.group(3)))
+              return result
+
+          old = findings('old.log')
+          latest = findings('latest.log')
+          print(f'OLD_FINDINGS={len(old)} LATEST_FINDINGS={len(latest)}')
+          print('ADDED', sorted(latest - old))
+          print('REMOVED', sorted(old - latest))
+          if latest != old:
+              raise SystemExit('Latest image does not preserve the existing finding set')
+          PY
+
+          test "$latest_status" -eq "$old_status"
+          ! grep -qi 'punycode' latest.log
+
+          node_version=$(docker run --rm --entrypoint node "$latest" --version)
+          cli_version=$(docker run --rm "$latest" --version)
+          echo "LATEST_NODE=$node_version"
+          echo "LATEST_CLI=$cli_version"
+          test "$node_version" = 'v24.18.0'
+          test "$cli_version" = '0.49.1'
+
+          rm old.log latest.log
+          git checkout -- practices/observability.md
+          test -z "$(git status --porcelain --untracked-files=no)"
