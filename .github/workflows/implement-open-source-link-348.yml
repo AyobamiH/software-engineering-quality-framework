@@ -1,0 +1,74 @@
+name: Implement and validate open source practice link
+
+on:
+  push:
+    branches:
+      - automation/implement-open-source-link-348
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: docs/link-open-source-practice-348
+          fetch-depth: 0
+
+      - name: Verify clean starting point
+        run: |
+          test "$(git rev-parse HEAD)" = "02563dfce3670db46ad4d9635cd5bebdca8d2934"
+          test -z "$(git status --porcelain)"
+
+      - name: Link open source practice from principles
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path("principles.md")
+          text = path.read_text(encoding="utf-8")
+          marker = "**Consider comments and Readme text**"
+          addition = (
+              "**[Code in the open.](practices/open-source.md)** Make new source code "
+              "open and reusable by default, and understand the licence obligations of "
+              "open source dependencies.\n\n"
+          )
+
+          if addition in text:
+              raise SystemExit("Open source practice link already exists")
+          if text.count(marker) != 1:
+              raise SystemExit("Expected exactly one insertion marker")
+
+          path.write_text(text.replace(marker, addition + marker, 1), encoding="utf-8")
+          PY
+
+      - name: Verify contribution scope and content
+        run: |
+          test "$(git diff --name-only)" = "principles.md"
+          git diff --check
+          test "$(grep -Foc '[Code in the open.](practices/open-source.md)' principles.md)" -eq 1
+          test -f practices/open-source.md
+
+      - name: Run repository Markdown lint
+        run: BRANCH_NAME=main scripts/markdown-check-format.sh
+
+      - name: Commit and push clean contribution
+        run: |
+          git config user.name "Ayobami Haastrup"
+          git config user.email "47716486+AyobamiH@users.noreply.github.com"
+          git add principles.md
+          git commit \
+            -m "Link open source practice from principles" \
+            -m "Closes #348"
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          git push origin HEAD:docs/link-open-source-practice-348
+
+      - name: Confirm final state
+        run: |
+          test -z "$(git status --porcelain)"
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          test "$(git diff --name-only origin/main...HEAD)" = "principles.md"
