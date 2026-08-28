@@ -1,0 +1,57 @@
+name: Audit markdownlint runtime for issue 315
+
+on:
+  push:
+    branches:
+      - automation/audit-markdownlint-runtime-315
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Inspect old and proposed image runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          old='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          new='ghcr.io/igorshubovych/markdownlint-cli@sha256:d994ac260316939ec7e2fb63b07ff6266754aa9ab64976d1e63948fb89f81772'
+
+          docker pull "$old"
+          docker pull "$new"
+
+          for image in "$old" "$new"; do
+            echo "=== $image ==="
+            docker run --rm --entrypoint node "$image" --version
+            docker run --rm "$image" --version
+            printf '# Valid markdown\n' > runtime-audit.md
+
+            set +e
+            normal=$(docker run --rm -v "$PWD:/workdir" "$image" runtime-audit.md 2>&1)
+            normal_status=$?
+            pending=$(docker run --rm -e NODE_OPTIONS=--pending-deprecation -v "$PWD:/workdir" "$image" runtime-audit.md 2>&1)
+            pending_status=$?
+            trace=$(docker run --rm -e NODE_OPTIONS=--trace-deprecation -v "$PWD:/workdir" "$image" runtime-audit.md 2>&1)
+            trace_status=$?
+            set -e
+
+            echo "NORMAL_STATUS=$normal_status"
+            printf '%s\n' "$normal"
+            echo "PENDING_STATUS=$pending_status"
+            printf '%s\n' "$pending"
+            echo "TRACE_STATUS=$trace_status"
+            printf '%s\n' "$trace"
+
+            test "$normal_status" -eq 0
+            test "$pending_status" -eq 0
+            test "$trace_status" -eq 0
+          done
+
+          rm runtime-audit.md
+          test -z "$(git status --porcelain --untracked-files=no)"
