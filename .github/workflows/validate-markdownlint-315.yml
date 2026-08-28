@@ -1,0 +1,115 @@
+name: Validate markdownlint-cli update for issue 315
+
+on:
+  push:
+    branches:
+      - automation/validate-markdownlint-315
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout clean contribution branch
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: chore/update-markdownlint-cli-315
+          fetch-depth: 0
+
+      - name: Verify contribution scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "b9a2ea53948584237a2ac8dfe8e15e80cde6b120"
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          test "$(git diff --name-only origin/main...HEAD)" = "scripts/markdown-check-format.sh"
+          git diff --check origin/main...HEAD
+          bash -n scripts/markdown-check-format.sh
+
+      - name: Confirm current release and immutable image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/igorshubovych/markdownlint-cli@sha256:905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de'
+
+          latest_tag=$(curl -fsSL \
+            https://api.github.com/repos/igorshubovych/markdownlint-cli/releases/latest \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          test "$latest_tag" = 'v0.49.1'
+
+          docker pull "$image"
+          resolved=$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')
+          version=$(docker run --rm "$image" --version 2>&1 | tail -n 1 | tr -d '\r')
+
+          test "$resolved" = "$image"
+          test "$version" = '0.49.1'
+          grep -Fq "$image # v0.49.1" scripts/markdown-check-format.sh
+
+      - name: Compare old and new images across all Markdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_image='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          new_image='ghcr.io/igorshubovych/markdownlint-cli@sha256:905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de'
+
+          docker pull "$old_image"
+          docker pull "$new_image"
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("${file#./}")
+          done < <(find . -path './.git' -prune -o -type f -name '*.md' -print0 | sort -z)
+
+          test "${#files[@]}" -gt 0
+
+          set +e
+          docker run --rm -v "$PWD:/workdir" "$old_image" \
+            "${files[@]}" --disable MD013 MD033 > old-markdownlint.log 2>&1
+          old_status=$?
+          docker run --rm -v "$PWD:/workdir" "$new_image" \
+            "${files[@]}" --disable MD013 MD033 > new-markdownlint.log 2>&1
+          new_status=$?
+          set -e
+
+          printf '%s\n' '--- old image output ---'
+          cat old-markdownlint.log
+          printf '%s\n' '--- new image output ---'
+          cat new-markdownlint.log
+
+          test "$old_status" -eq 0
+          test "$new_status" -eq 0
+          ! grep -qi 'punycode' new-markdownlint.log
+          rm old-markdownlint.log new-markdownlint.log
+
+      - name: Exercise the repository script on valid and invalid changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp README.md "$RUNNER_TEMP/README.md"
+
+          printf '\n' >> README.md
+          BRANCH_NAME=main scripts/markdown-check-format.sh \
+            > "$RUNNER_TEMP/valid-script.log" 2>&1
+          ! grep -qi 'punycode' "$RUNNER_TEMP/valid-script.log"
+          cp "$RUNNER_TEMP/README.md" README.md
+
+          printf '\n\tinvalid tab\n' >> README.md
+          set +e
+          BRANCH_NAME=main scripts/markdown-check-format.sh \
+            > "$RUNNER_TEMP/invalid-script.log" 2>&1
+          invalid_status=$?
+          set -e
+          cp "$RUNNER_TEMP/README.md" README.md
+
+          test "$invalid_status" -ne 0
+          grep -Fq 'MD010' "$RUNNER_TEMP/invalid-script.log"
+          ! grep -qi 'punycode' "$RUNNER_TEMP/invalid-script.log"
+
+          cat "$RUNNER_TEMP/valid-script.log"
+          cat "$RUNNER_TEMP/invalid-script.log"
+          test -z "$(git status --porcelain --untracked-files=no)"
