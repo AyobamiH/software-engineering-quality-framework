@@ -1,0 +1,102 @@
+name: Resolve compatible markdownlint image for issue 315
+
+on:
+  push:
+    branches:
+      - automation/resolve-compatible-markdownlint-315
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout exact upstream base
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: automation/resolve-compatible-markdownlint-315
+          fetch-depth: 0
+
+      - name: Resolve v0.39.0 and compare lint policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          old_image='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          target_tag='ghcr.io/igorshubovych/markdownlint-cli:v0.39.0'
+
+          docker pull "$old_image"
+          docker pull "$target_tag"
+
+          target_digest=$(docker image inspect "$target_tag" --format '{{index .RepoDigests 0}}')
+          target_version=$(docker run --rm "$target_tag" --version 2>&1 | tail -n 1 | tr -d '\r')
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("${file#./}")
+          done < <(find . -path './.git' -prune -o -type f -name '*.md' -print0 | sort -z)
+
+          set +e
+          docker run --rm -v "$PWD:/workdir" "$old_image" \
+            "${files[@]}" --disable MD013 MD033 > old.log 2>&1
+          old_status=$?
+          docker run --rm -v "$PWD:/workdir" "$target_tag" \
+            "${files[@]}" --disable MD013 MD033 > target-default.log 2>&1
+          target_default_status=$?
+          docker run --rm -v "$PWD:/workdir" "$target_tag" \
+            "${files[@]}" --disable MD013 MD033 MD055 MD056 > target-compatible.log 2>&1
+          target_compatible_status=$?
+          set -e
+
+          printf 'TARGET_DIGEST=%s\n' "$target_digest"
+          printf 'TARGET_VERSION=%s\n' "$target_version"
+          printf 'OLD_STATUS=%s TARGET_DEFAULT_STATUS=%s TARGET_COMPATIBLE_STATUS=%s\n' \
+            "$old_status" "$target_default_status" "$target_compatible_status"
+          printf '%s\n' '--- TARGET DEFAULT OUTPUT ---'
+          cat target-default.log
+          printf '%s\n' '--- TARGET COMPATIBLE OUTPUT ---'
+          cat target-compatible.log
+
+          test "$target_version" = '0.39.0'
+          ! grep -qi 'punycode' target-default.log
+          ! grep -qi 'punycode' target-compatible.log
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(r"^(.*?\.md):(\d+)(?::\d+)?(?: error)? (MD\d+)")
+
+          def findings(path):
+              result = set()
+              for line in Path(path).read_text(encoding="utf-8").splitlines():
+                  match = pattern.match(line)
+                  if match:
+                      result.add((match.group(1), int(match.group(2)), match.group(3)))
+              return result
+
+          old = findings("old.log")
+          default = findings("target-default.log")
+          compatible = findings("target-compatible.log")
+
+          print("DEFAULT_ADDED", sorted(default - old))
+          print("DEFAULT_REMOVED", sorted(old - default))
+          print("COMPATIBLE_ADDED", sorted(compatible - old))
+          print("COMPATIBLE_REMOVED", sorted(old - compatible))
+
+          if compatible != old:
+              raise SystemExit("v0.39.0 compatibility configuration changed the existing lint findings")
+          if not (default - old):
+              raise SystemExit("Expected v0.39.0 defaults to introduce at least one new finding")
+          PY
+
+          printf '# Valid markdown\n' > markdownlint-validation.md
+          valid_output=$(docker run --rm -v "$PWD:/workdir" "$target_tag" \
+            markdownlint-validation.md --disable MD013 MD033 MD055 MD056 2>&1)
+          rm markdownlint-validation.md old.log target-default.log target-compatible.log
+
+          test -z "$valid_output"
+          test -z "$(git status --porcelain --untracked-files=no)"
