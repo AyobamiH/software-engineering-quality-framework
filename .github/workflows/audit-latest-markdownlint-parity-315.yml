@@ -28,8 +28,8 @@ jobs:
           path = Path('practices/observability.md')
           text = path.read_text(encoding='utf-8')
           replacements = {
-              '**Clear-box monitoring**<br/>': '### Clear-box monitoring',
-              '**Opaque-box monitoring**<br/>': '### Opaque-box monitoring',
+              '**Clear-box monitoring**<br/>\n>': '### Clear-box monitoring\n\n>',
+              '**Opaque-box monitoring**<br/>\n>': '### Opaque-box monitoring\n\n>',
           }
           for old, new in replacements.items():
               if text.count(old) != 1:
@@ -76,6 +76,8 @@ jobs:
           print('REMOVED', sorted(old - latest))
           if latest != old:
               raise SystemExit('Latest image does not preserve the existing finding set')
+          if len(old) != 40:
+              raise SystemExit(f'Expected the established 40-finding baseline, got {len(old)}')
           PY
 
           test "$latest_status" -eq "$old_status"
