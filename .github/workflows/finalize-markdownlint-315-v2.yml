@@ -1,0 +1,242 @@
+name: Finalize markdownlint-cli issue 315
+
+on:
+  push:
+    branches:
+      - automation/finalize-markdownlint-315-v2
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout exact upstream base
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify starting state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "02563dfce3670db46ad4d9635cd5bebdca8d2934"
+          test -z "$(git status --porcelain)"
+
+      - name: Apply current-runtime tooling update
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          script_path = Path("scripts/markdown-check-format.sh")
+          script = script_path.read_text(encoding="utf-8")
+          old_image = (
+              "  image=ghcr.io/igorshubovych/markdownlint-cli@sha256:"
+              "df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80"
+              " # v0.32.2"
+          )
+          new_image = (
+              "  image=ghcr.io/igorshubovych/markdownlint-cli@sha256:"
+              "905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de"
+              " # v0.49.1"
+          )
+          old_rules = "      --disable MD013 MD033"
+          new_rules = "      --disable MD013 MD033 MD055 MD056 MD058 MD059 MD060"
+          if script.count(old_image) != 1:
+              raise SystemExit("Expected exactly one v0.32.2 image pin")
+          if script.count(old_rules) != 1:
+              raise SystemExit("Expected exactly one existing disabled-rule list")
+          script = script.replace(old_image, new_image, 1)
+          script = script.replace(old_rules, new_rules, 1)
+          script_path.write_text(script, encoding="utf-8")
+
+          observability_path = Path("practices/observability.md")
+          observability = observability_path.read_text(encoding="utf-8")
+          replacements = {
+              "**Clear-box monitoring**<br/>\n>":
+                  "### Clear-box monitoring\n\n>",
+              "**Opaque-box monitoring**<br/>\n>":
+                  "### Opaque-box monitoring\n\n>",
+          }
+          for old, new in replacements.items():
+              if observability.count(old) != 1:
+                  raise SystemExit(f"Expected exactly one occurrence of {old!r}")
+              observability = observability.replace(old, new, 1)
+          observability_path.write_text(observability, encoding="utf-8")
+          PY
+
+      - name: Verify scope and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$(printf '%s\n' \
+            practices/observability.md \
+            scripts/markdown-check-format.sh | sort)
+          actual=$(git diff --name-only | sort)
+          test "$actual" = "$expected"
+          git diff --check
+          bash -n scripts/markdown-check-format.sh
+          grep -Fq \
+            'markdownlint-cli@sha256:905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de # v0.49.1' \
+            scripts/markdown-check-format.sh
+          grep -Fq -- \
+            '--disable MD013 MD033 MD055 MD056 MD058 MD059 MD060' \
+            scripts/markdown-check-format.sh
+          test "$(grep -Fxc '### Clear-box monitoring' practices/observability.md)" -eq 1
+          test "$(grep -Fxc '### Opaque-box monitoring' practices/observability.md)" -eq 1
+          ! grep -Fq '**Clear-box monitoring**<br/>' practices/observability.md
+          ! grep -Fq '**Opaque-box monitoring**<br/>' practices/observability.md
+
+      - name: Verify immutable current image and runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/igorshubovych/markdownlint-cli@sha256:905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de'
+          docker pull "$image"
+          resolved=$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')
+          node_version=$(docker run --rm --entrypoint node "$image" --version)
+          cli_version=$(docker run --rm "$image" --version)
+          echo "RESOLVED=$resolved"
+          echo "NODE=$node_version"
+          echo "CLI=$cli_version"
+          test "$resolved" = "$image"
+          test "$node_version" = 'v24.18.0'
+          test "$cli_version" = '0.49.1'
+
+      - name: Prove warning removal and full-corpus policy parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          old='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          new='ghcr.io/igorshubovych/markdownlint-cli@sha256:905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de'
+          docker pull "$old"
+          docker pull "$new"
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("${file#./}")
+          done < <(find . -path './.git' -prune -o -type f -name '*.md' -print0 | sort -z)
+          test "${#files[@]}" -gt 0
+
+          set +e
+          docker run --rm -v "$PWD:/workdir" "$old" \
+            "${files[@]}" --disable MD013 MD033 > old.log 2>&1
+          old_status=$?
+          docker run --rm -v "$PWD:/workdir" "$new" \
+            "${files[@]}" --disable MD013 MD033 MD055 MD056 MD058 MD059 MD060 \
+            > new.log 2>&1
+          new_status=$?
+          old_pending=$(docker run --rm -e NODE_OPTIONS=--pending-deprecation \
+            -v "$PWD:/workdir" "$old" README.md --disable MD013 MD033 2>&1)
+          old_pending_status=$?
+          new_pending=$(docker run --rm -e NODE_OPTIONS=--pending-deprecation \
+            -v "$PWD:/workdir" "$new" README.md \
+            --disable MD013 MD033 MD055 MD056 MD058 MD059 MD060 2>&1)
+          new_pending_status=$?
+          new_trace=$(docker run --rm -e NODE_OPTIONS=--trace-deprecation \
+            -v "$PWD:/workdir" "$new" README.md \
+            --disable MD013 MD033 MD055 MD056 MD058 MD059 MD060 2>&1)
+          new_trace_status=$?
+          set -e
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(r"^(.*?\.md):(\d+)(?::\d+)?(?: error)? (MD\d+)")
+
+          def findings(path):
+              result = set()
+              for line in Path(path).read_text(encoding="utf-8").splitlines():
+                  match = pattern.match(line)
+                  if match:
+                      result.add((match.group(1), int(match.group(2)), match.group(3)))
+              return result
+
+          old = findings("old.log")
+          new = findings("new.log")
+          print(f"OLD_FINDINGS={len(old)} NEW_FINDINGS={len(new)}")
+          print("ADDED", sorted(new - old))
+          print("REMOVED", sorted(old - new))
+          if len(old) != 40:
+              raise SystemExit(f"Expected established 40-finding baseline, got {len(old)}")
+          if new != old:
+              raise SystemExit("Updated image changed the established finding set")
+          PY
+
+          test "$old_status" -eq "$new_status"
+          test "$old_pending_status" -eq 0
+          test "$new_pending_status" -eq 0
+          test "$new_trace_status" -eq 0
+          grep -qi 'punycode' <<< "$old_pending"
+          ! grep -qi 'punycode' <<< "$new_pending"
+          ! grep -qi 'punycode' <<< "$new_trace"
+          rm old.log new.log
+
+      - name: Exercise the repository script through passing and failing paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp practices/observability.md "$RUNNER_TEMP/observability.md"
+
+          set +e
+          BRANCH_NAME=main scripts/markdown-check-format.sh \
+            > "$RUNNER_TEMP/valid.log" 2>&1
+          valid_status=$?
+          set -e
+
+          printf '\n\tinvalid tab\n' >> practices/observability.md
+          set +e
+          BRANCH_NAME=main scripts/markdown-check-format.sh \
+            > "$RUNNER_TEMP/invalid.log" 2>&1
+          invalid_status=$?
+          set -e
+          cp "$RUNNER_TEMP/observability.md" practices/observability.md
+
+          echo '--- valid path ---'
+          cat "$RUNNER_TEMP/valid.log"
+          echo '--- invalid path ---'
+          cat "$RUNNER_TEMP/invalid.log"
+
+          test "$valid_status" -eq 0
+          test "$invalid_status" -ne 0
+          grep -Fq 'MD010' "$RUNNER_TEMP/invalid.log"
+          ! grep -qi 'punycode' "$RUNNER_TEMP/valid.log"
+          ! grep -qi 'punycode' "$RUNNER_TEMP/invalid.log"
+          git diff --check
+
+      - name: Commit and safely amend the existing PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Ayobami Haastrup"
+          git config user.email "47716486+AyobamiH@users.noreply.github.com"
+          git add practices/observability.md scripts/markdown-check-format.sh
+          git commit \
+            -m "Update markdownlint-cli and observability headings" \
+            -m "Closes #315"
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          git push \
+            --force-with-lease=refs/heads/chore/update-markdownlint-cli-315:897345d40dd3ed39c381e9b1b59112e74652676e \
+            origin HEAD:refs/heads/chore/update-markdownlint-cli-315
+
+      - name: Confirm final branch shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin chore/update-markdownlint-cli-315
+          final_sha=$(git rev-parse origin/chore/update-markdownlint-cli-315)
+          test "$final_sha" = "$(git rev-parse HEAD)"
+          test "$(git rev-list --count origin/main..HEAD)" -eq 1
+          expected=$(printf '%s\n' \
+            practices/observability.md \
+            scripts/markdown-check-format.sh | sort)
+          actual=$(git diff --name-only origin/main...HEAD | sort)
+          test "$actual" = "$expected"
+          test -z "$(git status --porcelain)"
