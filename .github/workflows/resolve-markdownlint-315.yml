@@ -1,0 +1,65 @@
+name: Resolve markdownlint image for issue 315
+
+on:
+  push:
+    branches:
+      - automation/resolve-markdownlint-315
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout exact upstream base
+        uses: actions/checkout@v4
+        with:
+          ref: automation/resolve-markdownlint-315
+          fetch-depth: 0
+
+      - name: Verify starting point
+        run: |
+          test "$(git rev-parse HEAD^)" = "02563dfce3670db46ad4d9635cd5bebdca8d2934"
+          test -z "$(git diff --name-only HEAD^ -- . ':!.github/workflows/resolve-markdownlint-315.yml')"
+
+      - name: Resolve and validate current stable image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          old_image='ghcr.io/igorshubovych/markdownlint-cli@sha256:df7ce7cdcdb525d52a89d7aab17c507d49adceaddf2b767d3ed799c9537ded80'
+          new_tag='ghcr.io/igorshubovych/markdownlint-cli:v0.49.1'
+
+          docker pull "$old_image"
+          docker pull "$new_tag"
+
+          new_digest=$(docker image inspect "$new_tag" --format '{{index .RepoDigests 0}}')
+          new_version=$(docker run --rm "$new_tag" --version 2>&1 | tail -n 1 | tr -d '\r')
+
+          printf '# Valid markdown\n' > markdownlint-validation.md
+
+          set +e
+          old_output=$(docker run --rm -v "$PWD:/workdir" "$old_image" markdownlint-validation.md --disable MD013 MD033 2>&1)
+          old_status=$?
+          new_output=$(docker run --rm -v "$PWD:/workdir" "$new_tag" markdownlint-validation.md --disable MD013 MD033 2>&1)
+          new_status=$?
+          set -e
+
+          rm markdownlint-validation.md
+
+          printf 'NEW_DIGEST=%s\n' "$new_digest"
+          printf 'NEW_VERSION=%s\n' "$new_version"
+          printf '%s\n' '--- OLD OUTPUT ---'
+          printf '%s\n' "$old_output"
+          printf '%s\n' '--- NEW OUTPUT ---'
+          printf '%s\n' "$new_output"
+
+          test "$old_status" -eq 0
+          test "$new_status" -eq 0
+          test "$new_version" = '0.49.1'
+          test "${new_digest#ghcr.io/igorshubovych/markdownlint-cli@sha256:}" != "$new_digest"
+          ! grep -qi 'punycode' <<< "$new_output"
+          test -z "$(git status --porcelain --untracked-files=no)"
